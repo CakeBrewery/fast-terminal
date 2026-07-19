@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 
-# Exit on error
+# setup_fast_terminal.sh — converge this machine to the "fast terminal" setup:
+#   - zsh: Pure prompt, cached completions, fzf, plugins, lazy-loaded nvm/kubectl
+#   - tmux: Dreams of Code keybindings + tpm-managed plugins, Snazzy theme
+#   - terminal emulator: iTerm2 or Ghostty (auto-detected), Snazzy theme
+#
+# Idempotent: safe to re-run at any time. Generated files are rewritten only
+# when their content changes, include lines are appended only once, and
+# [SUCCESS] is printed only for actual changes.
+
 set -e
 
-ZSH_DIR="$HOME/.zsh"
-FAST_TERMINAL_ZSH="$ZSH_DIR/fast_terminal.zsh"
-ZSHRC="$HOME/.zshrc"
+# --- Output helpers ----------------------------------------------------------
 
-# Print colored output
 info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
 success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
-info "Setting up the fast terminal environment in $ZSH_DIR..."
+# --- File helpers ------------------------------------------------------------
 
-# 1. Create the base directory
-mkdir -p "$ZSH_DIR"
-
-# Helper function to clone or update a git repository
+# Clone a git repository unless it is already present.
 clone_plugin() {
     local repo_url=$1
     local target_dir=$2
@@ -50,29 +52,52 @@ write_managed_file() {
     fi
 }
 
-# 2. Install fzf binary if missing
-if ! command -v fzf &> /dev/null; then
-    info "Installing fzf binary..."
-    if [ ! -d "$HOME/.fzf" ]; then
-        git clone --depth 1 https://github.com/junegunn/fzf.git "$HOME/.fzf"
+# Append $line (preceded by "# $comment") to $dest unless an active,
+# uncommented line already matches the extended regex $pattern. Sets
+# INCLUDE_LINE_CHANGED=1 if the line was appended, 0 if already present.
+ensure_include() {
+    local dest=$1 pattern=$2 comment=$3 line=$4
+
+    touch "$dest"
+    if grep -qE "$pattern" "$dest"; then
+        info "$dest already loads the fast terminal configuration."
+        INCLUDE_LINE_CHANGED=0
+    else
+        info "Adding include line to $dest..."
+        printf '\n# %s\n%s\n' "$comment" "$line" >> "$dest"
+        success "Appended to $dest."
+        INCLUDE_LINE_CHANGED=1
     fi
-    "$HOME/.fzf/install" --all --no-bash --no-fish --no-update-rc
-    success "Installed fzf."
-else
-    info "fzf binary is already installed."
-fi
+}
 
-# 3. Clone plugins and prompt
-info "Installing ZSH plugins and Pure prompt..."
-clone_plugin "https://github.com/Aloxaf/fzf-tab" "$ZSH_DIR/fzf-tab"
-clone_plugin "https://github.com/zsh-users/zsh-autosuggestions" "$ZSH_DIR/zsh-autosuggestions"
-clone_plugin "https://github.com/zsh-users/zsh-syntax-highlighting" "$ZSH_DIR/zsh-syntax-highlighting"
-clone_plugin "https://github.com/sindresorhus/pure" "$ZSH_DIR/pure"
+# --- zsh ----------------------------------------------------------------------
 
-# 4. Create the self-contained ZSH configuration file
-info "Checking $FAST_TERMINAL_ZSH..."
+configure_zsh() {
+    local zsh_dir="$HOME/.zsh"
+    local fast_zsh="$zsh_dir/fast_terminal.zsh"
 
-write_managed_file "$FAST_TERMINAL_ZSH" << 'EOF'
+    info "Setting up the fast terminal shell environment in $zsh_dir..."
+    mkdir -p "$zsh_dir"
+
+    # fzf binary (history search, file finding, used by fzf-tab)
+    if ! command -v fzf &> /dev/null; then
+        info "Installing fzf binary..."
+        if [ ! -d "$HOME/.fzf" ]; then
+            git clone --depth 1 https://github.com/junegunn/fzf.git "$HOME/.fzf"
+        fi
+        "$HOME/.fzf/install" --all --no-bash --no-fish --no-update-rc
+        success "Installed fzf."
+    else
+        info "fzf binary is already installed."
+    fi
+
+    info "Installing ZSH plugins and Pure prompt..."
+    clone_plugin "https://github.com/Aloxaf/fzf-tab" "$zsh_dir/fzf-tab"
+    clone_plugin "https://github.com/zsh-users/zsh-autosuggestions" "$zsh_dir/zsh-autosuggestions"
+    clone_plugin "https://github.com/zsh-users/zsh-syntax-highlighting" "$zsh_dir/zsh-syntax-highlighting"
+    clone_plugin "https://github.com/sindresorhus/pure" "$zsh_dir/pure"
+
+    write_managed_file "$fast_zsh" << 'EOF'
 # Fast terminal configuration from: https://mijndertstuij.nl/posts/life-is-too-short-for-a-slow-terminal/
 
 # Enable extended_glob for compinit cache check
@@ -93,8 +118,12 @@ fi
 autoload -U promptinit; promptinit
 prompt pure
 
-# 3. fzf binary configuration
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
+# 3. fzf keybindings and completion (git install, else brew/other installs)
+if [ -f ~/.fzf.zsh ]; then
+  source ~/.fzf.zsh
+elif command -v fzf &> /dev/null; then
+  source <(fzf --zsh)
+fi
 
 # 4. Plugins
 # It is recommended to load syntax highlighting last
@@ -102,7 +131,7 @@ source ~/.zsh/fzf-tab/fzf-tab.plugin.zsh
 source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
 source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
-# 4. Lazy-loading nvm
+# 5. Lazy-loading nvm
 export NVM_DIR="$HOME/.nvm"
 nvm() {
   unset -f nvm
@@ -111,7 +140,7 @@ nvm() {
   nvm "$@"
 }
 
-# 5. Lazy-loading kubectl
+# 6. Lazy-loading kubectl
 kubectl() {
     command kubectl "$@"
     local ret=$?
@@ -123,38 +152,35 @@ kubectl() {
 }
 EOF
 
-# 4. Source the configuration in ~/.zshrc
-info "Checking $ZSHRC..."
+    ensure_include "$HOME/.zshrc" \
+        '^[[:space:]]*source[[:space:]]+~/\.zsh/fast_terminal\.zsh' \
+        "Load fast terminal configuration" \
+        "source ~/.zsh/fast_terminal.zsh"
+}
 
-touch "$ZSHRC"
+# --- tmux ---------------------------------------------------------------------
 
-if grep -q "source ~/.zsh/fast_terminal.zsh" "$ZSHRC"; then
-    info "The fast terminal configuration is already sourced in $ZSHRC."
-else
-    info "Adding source directive to $ZSHRC..."
-    echo "" >> "$ZSHRC"
-    echo "# Load fast terminal configuration" >> "$ZSHRC"
-    echo "source ~/.zsh/fast_terminal.zsh" >> "$ZSHRC"
-    success "Appended to $ZSHRC."
-fi
-
-# 5. Configure tmux theme (terminal-independent; tmux draws its own status
-# bar, pane borders, and messages, so it needs matching colors of its own)
-if command -v tmux &> /dev/null; then
-    TMUX_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tmux"
-    TMUX_FAST_CONF="$TMUX_DIR/fast-terminal.conf"
-    TMUX_CONF="$HOME/.tmux.conf"
+# tmux draws its own status bar, borders, and messages, and manages its own
+# keybindings and plugins, so it gets a full configuration of its own.
+configure_tmux() {
+    local tmux_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tmux"
+    local fast_conf="$tmux_dir/fast-terminal.conf"
+    local tmux_conf="$HOME/.tmux.conf"
     # Prefer an existing XDG-style tmux.conf if that is what the user uses
-    if [ ! -f "$TMUX_CONF" ] && [ -f "$TMUX_DIR/tmux.conf" ]; then
-        TMUX_CONF="$TMUX_DIR/tmux.conf"
+    if [ ! -f "$tmux_conf" ] && [ -f "$tmux_dir/tmux.conf" ]; then
+        tmux_conf="$tmux_dir/tmux.conf"
     fi
 
-    info "Configuring tmux theme..."
-    mkdir -p "$TMUX_DIR"
+    info "Configuring tmux..."
+    mkdir -p "$tmux_dir"
 
-    write_managed_file "$TMUX_FAST_CONF" << 'EOF'
-# Fast terminal tmux theme (generated by setup_fast_terminal.sh)
-# Snazzy palette on the #1b1b1b (Vine Black) custom background
+    # tpm must exist before the config's `run tpm` line is ever sourced
+    clone_plugin "https://github.com/tmux-plugins/tpm" "$HOME/.tmux/plugins/tpm"
+
+    write_managed_file "$fast_conf" << 'EOF'
+# Fast terminal tmux configuration (generated by setup_fast_terminal.sh)
+# Based on the Dreams of Code tmux setup (github.com/dreamsofcode-io/tmux),
+# with the Snazzy / #1b1b1b (Vine Black) theme instead of catppuccin
 
 # True color support so the terminal theme renders correctly inside tmux
 set -g default-terminal "tmux-256color"
@@ -162,6 +188,61 @@ set -g default-terminal "tmux-256color"
 %if #{==:#{m:*RGB*,#{terminal-overrides}},0}
 set -ga terminal-overrides ",*:RGB"
 %endif
+
+set -g mouse on
+
+# C-Space as the prefix key
+unbind C-b
+set -g prefix C-Space
+bind C-Space send-prefix
+
+# Vim style pane selection
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+
+# Start windows and panes at 1, not 0
+set -g base-index 1
+set -g pane-base-index 1
+set-window-option -g pane-base-index 1
+set-option -g renumber-windows on
+
+# Use Alt-arrow keys without prefix key to switch panes
+bind -n M-Left select-pane -L
+bind -n M-Right select-pane -R
+bind -n M-Up select-pane -U
+bind -n M-Down select-pane -D
+
+# Shift arrow to switch windows
+bind -n S-Left  previous-window
+bind -n S-Right next-window
+
+# Shift Alt vim keys to switch windows
+bind -n M-H previous-window
+bind -n M-L next-window
+
+# set vi-mode
+set-window-option -g mode-keys vi
+# keybindings
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi C-v send-keys -X rectangle-toggle
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+# Open new splits in the current pane's directory
+bind '"' split-window -v -c "#{pane_current_path}"
+bind % split-window -h -c "#{pane_current_path}"
+
+# Plugins (managed by tpm; installed by this script, or with prefix + I)
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-sensible'
+set -g @plugin 'christoomey/vim-tmux-navigator'
+set -g @plugin 'tmux-plugins/tmux-yank'
+
+run '~/.tmux/plugins/tpm/tpm'
+
+# Theme: Snazzy palette on the #1b1b1b (Vine Black) custom background,
+# loaded after the plugins so it always wins
 
 # Status bar
 set -g status-style "bg=#1b1b1b,fg=#eff0eb"
@@ -182,24 +263,41 @@ set -g message-command-style "bg=#1b1b1b,fg=#f3f99d"
 # Copy mode selection
 setw -g mode-style "bg=#3e404e,fg=#eff0eb"
 EOF
+    local conf_changed=$MANAGED_FILE_CHANGED
 
-    touch "$TMUX_CONF"
-    if grep -q "fast-terminal.conf" "$TMUX_CONF"; then
-        info "tmux config already sources fast-terminal.conf."
+    ensure_include "$tmux_conf" \
+        '^[[:space:]]*source(-file)?[[:space:]].*fast-terminal\.conf' \
+        "Load fast terminal configuration" \
+        "source-file $fast_conf"
+
+    # Apply immediately if anything changed and a tmux server is running
+    if { [ "$conf_changed" = 1 ] || [ "$INCLUDE_LINE_CHANGED" = 1 ]; } \
+        && tmux list-sessions &> /dev/null; then
+        tmux source-file "$fast_conf"
+        info "Reloaded config in the running tmux server."
+    fi
+
+    # Install the tpm-managed plugins (idempotent; same as pressing prefix + I)
+    local tpm_output
+    if tpm_output="$("$HOME/.tmux/plugins/tpm/bin/install_plugins" 2>&1)"; then
+        if echo "$tpm_output" | grep -q "download success"; then
+            success "Installed tmux plugins via tpm."
+            # Load the freshly installed plugins into a running server
+            if tmux list-sessions &> /dev/null; then
+                tmux source-file "$fast_conf"
+            fi
+        else
+            info "tmux plugins are already installed."
+        fi
     else
-        info "Adding source-file directive to $TMUX_CONF..."
-        printf '\n# Load fast terminal theme\nsource-file %s\n' "$TMUX_FAST_CONF" >> "$TMUX_CONF"
-        success "Appended to $TMUX_CONF."
+        warning "tpm plugin installation failed: $tpm_output"
     fi
+}
 
-    # Apply immediately if the theme changed and a tmux server is running
-    if [ "$MANAGED_FILE_CHANGED" = 1 ] && tmux list-sessions &> /dev/null; then
-        tmux source-file "$TMUX_FAST_CONF"
-        info "Reloaded theme in the running tmux server."
-    fi
-fi
+# --- Terminal emulators -------------------------------------------------------
 
-# 6. Configure the terminal emulator (iTerm2 or Ghostty)
+# The Snazzy palette is downloaded from sindresorhus/iterm2-snazzy at run time,
+# with the background overridden to #1b1b1b (Vine Black).
 configure_iterm() {
     info "Configuring iTerm2 profile..."
     local dest_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
@@ -281,24 +379,27 @@ font-family = Menlo
 font-size = 12
 cursor-style = bar
 EOF
-
     local conf_changed=$MANAGED_FILE_CHANGED
 
-    touch "$ghostty_conf"
-    if grep -q "^config-file = fast-terminal.conf" "$ghostty_conf"; then
-        info "Ghostty config already includes fast-terminal.conf."
-    else
-        info "Adding config-file directive to $ghostty_conf..."
-        printf '\n# Load fast terminal configuration\nconfig-file = fast-terminal.conf\n' >> "$ghostty_conf"
-        conf_changed=1
-    fi
+    ensure_include "$ghostty_conf" \
+        '^[[:space:]]*config-file[[:space:]]*=[[:space:]]*"?fast-terminal\.conf' \
+        "Load fast terminal configuration" \
+        "config-file = fast-terminal.conf"
 
-    if [ "$conf_changed" = 1 ]; then
+    if [ "$conf_changed" = 1 ] || [ "$INCLUDE_LINE_CHANGED" = 1 ]; then
         success "Configured Ghostty (Snazzy theme, Menlo font, vertical cursor). Reload its config (Cmd+Shift+,) or restart Ghostty to apply."
     else
         info "Ghostty is already fully configured; nothing to change."
     fi
 }
+
+# --- Main ---------------------------------------------------------------------
+
+configure_zsh
+
+if command -v tmux &> /dev/null; then
+    configure_tmux
+fi
 
 # tmux masks TERM_PROGRAM; the tmux server still has the environment of the
 # terminal it was started from, so ask it for the original value
